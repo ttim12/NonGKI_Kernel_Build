@@ -1,17 +1,17 @@
-name: Build SukiSU for Mi8SE (Final Fix)
+name: Build SukiSU for Mi8SE (Final Corrected)
 on:
   workflow_dispatch:
 
 jobs:
   build:
     name: Build Kernel
-    # 【已验证】使用 Ubuntu 22.04，解决了之前的 Exit 100 依赖报错
+    # 【已验证】Ubuntu 22.04 环境最稳，不排队且兼容性好
     runs-on: ubuntu-22.04
     
     env:
       KERNEL_SOURCE: 'https://github.com/SakuraKyuo/android_kernel_xiaomi_sdm710'
-      # 【已修正】删除了 KERNEL_SOURCE_BRANCH 变量，不再指定 13.0，防止报错
-      KERNEL_DEFCONFIG: 'vendor/sirius_perf_defconfig'
+      # 【修正1】去掉 vendor/ 前缀，直接用标准文件名，解决 Exit 2 报错
+      KERNEL_DEFCONFIG: 'sirius_perf_defconfig'
       KERNEL_IMAGE_NAME: 'Image.gz-dtb'
       ARCH: 'arm64'
     
@@ -19,7 +19,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
 
-    # 1. 安装基础工具
+    # 1. 环境安装 (保留已验证通过的精简列表)
     - name: Setup Basic Tools
       run: |
         sudo apt-get update
@@ -30,24 +30,23 @@ jobs:
           pngcrush rsync schedtool squashfs-tools xsltproc zip \
           zlib1g-dev libncurses5 libncurses5-dev zstd
 
-    # 2. 下载编译器
-    # 【已验证】这一步在你刚才的运行中已经通过了，说明 Git 方法是有效的
+    # 2. 下载工具链 (保留已验证通过的 Git Clone 方案)
     - name: Clone Toolchains
       run: |
-        # 克隆 Proton Clang
+        # Clang
         echo "Cloning Clang..."
         git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
 
-        # 克隆 GCC 4.9 (64位)
+        # GCC 64位
         echo "Cloning GCC 64..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
 
-        # 克隆 GCC 4.9 (32位)
+        # GCC 32位
         echo "Cloning GCC 32..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
 
     # 3. 下载内核源码
-    # 【核心修正】去掉了 -b 参数，解决 "Remote branch 13.0 not found" 报错
+    # 【修正2】彻底删掉 -b 参数，直接克隆默认分支，解决 Exit 128 报错
     - name: Clone Kernel Source
       run: |
         echo "Cloning Kernel Source (Default Branch)..."
@@ -60,7 +59,6 @@ jobs:
         
         # 伪造版本号：4.9.336-perf-g30e2137d229f
         echo "Applying Version Spoofing..."
-        # 强制修改 Makefile
         sed -i 's/^VERSION =.*/VERSION = 4/' Makefile
         sed -i 's/^PATCHLEVEL =.*/PATCHLEVEL = 9/' Makefile
         sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 336/' Makefile
@@ -83,7 +81,7 @@ jobs:
         make O=out ARCH=arm64 clean
         make O=out ARCH=arm64 mrproper
         
-        # 生成配置文件
+        # 生成配置文件 (这里会用到修正后的 sirius_perf_defconfig)
         make O=out ARCH=arm64 $KERNEL_DEFCONFIG
 
         # 清除配置里的后缀，防止干扰伪造
@@ -105,7 +103,7 @@ jobs:
         git clone https://github.com/osm0sis/AnyKernel3
         cp kernel_source/out/arch/arm64/boot/$KERNEL_IMAGE_NAME AnyKernel3/
         cd AnyKernel3
-        zip -r9 SukiSU-Mi8SE-GitVersion.zip * -x .git README.md *placeholder
+        zip -r9 SukiSU-Mi8SE-Signed.zip * -x .git README.md *placeholder
 
     # 7. 上传
     - name: Upload Artifact
