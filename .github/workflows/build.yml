@@ -1,4 +1,4 @@
-name: Build SukiSU for Mi8SE (Auto-Seek)
+name: Build SukiSU for Mi8SE (SDM670 Config)
 on:
   workflow_dispatch:
 
@@ -9,6 +9,9 @@ jobs:
     
     env:
       KERNEL_SOURCE: 'https://github.com/SakuraKyuo/android_kernel_xiaomi_sdm710'
+      # 【核心修正】根据您的日志，这是唯一正确的配置文件名
+      # SDM710 和 SDM670 共用同一个配置，这是高通源码的特性
+      KERNEL_DEFCONFIG: 'sdm670-perf_defconfig'
       KERNEL_IMAGE_NAME: 'Image.gz-dtb'
       ARCH: 'arm64'
     
@@ -27,7 +30,7 @@ jobs:
           pngcrush rsync schedtool squashfs-tools xsltproc zip \
           zlib1g-dev libncurses5 libncurses5-dev zstd
 
-    # 2. 下载工具链
+    # 2. 下载工具链 (Git Clone)
     - name: Clone Toolchains
       run: |
         echo "Cloning Clang..."
@@ -50,7 +53,7 @@ jobs:
       run: |
         cd kernel_source
         
-        # 伪造版本号
+        # 伪造版本号：4.9.336-perf-g30e2137d229f
         sed -i 's/^VERSION =.*/VERSION = 4/' Makefile
         sed -i 's/^PATCHLEVEL =.*/PATCHLEVEL = 9/' Makefile
         sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 336/' Makefile
@@ -60,7 +63,7 @@ jobs:
         # 集成 SukiSU
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
-    # 5. 自动追踪配置并编译
+    # 5. 开始编译
     - name: Build Kernel
       run: |
         cd kernel_source
@@ -69,38 +72,9 @@ jobs:
         make O=out ARCH=arm64 clean
         make O=out ARCH=arm64 mrproper
         
-        # ===【核心修改：自动寻找配置文件】===
-        echo "正在自动扫描配置文件..."
-        
-        # 1. 优先寻找名字里包含 'sirius' (米8SE) 的配置文件
-        DETECTED_CONFIG=$(find arch/arm64/configs -name "*defconfig" | grep "sirius" | head -n 1)
-        
-        # 2. 没找到的话，找包含 'sdm710' 的
-        if [ -z "$DETECTED_CONFIG" ]; then
-            DETECTED_CONFIG=$(find arch/arm64/configs -name "*defconfig" | grep "sdm710" | head -n 1)
-        fi
-        
-        # 3. 再没找到，找 vendor 目录下的第一个配置文件 (保底)
-        if [ -z "$DETECTED_CONFIG" ]; then
-             DETECTED_CONFIG=$(find arch/arm64/configs -name "vendor*defconfig" | head -n 1)
-        fi
-
-        # 如果还是空的，列出所有文件让用户看（防止绝望）
-        if [ -z "$DETECTED_CONFIG" ]; then
-            echo "❌ 致命错误：无法在源码中找到任何配置文件！"
-            ls -R arch/arm64/configs
-            exit 1
-        fi
-
-        # 处理路径：去掉 arch/arm64/configs/ 前缀，只保留文件名
-        # 例如：arch/arm64/configs/vendor/sirius_perf_defconfig -> vendor/sirius_perf_defconfig
-        REAL_CONFIG=${DETECTED_CONFIG#arch/arm64/configs/}
-        
-        echo "✅ 成功找到配置文件: $REAL_CONFIG"
-        echo "正在使用该配置开始编译..."
-        
-        # 使用自动找到的文件名进行配置
-        make O=out ARCH=arm64 $REAL_CONFIG
+        # 使用 SDM670 配置 (兼容米8SE)
+        echo "正在使用 sdm670-perf_defconfig 开始配置..."
+        make O=out ARCH=arm64 $KERNEL_DEFCONFIG
 
         # 清除配置里的后缀
         cd out
