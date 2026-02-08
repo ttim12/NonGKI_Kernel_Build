@@ -1,11 +1,10 @@
-name: Build SukiSU for Mi8SE (Standalone Toolchain)
+name: Build SukiSU for Mi8SE (Git Method)
 on:
   workflow_dispatch:
 
 jobs:
   build:
     name: Build Kernel
-    # 使用 Ubuntu 22.04，排队快，且基础库兼容性好
     runs-on: ubuntu-22.04
     
     env:
@@ -14,16 +13,12 @@ jobs:
       KERNEL_DEFCONFIG: 'vendor/sirius_perf_defconfig'
       KERNEL_IMAGE_NAME: 'Image.gz-dtb'
       ARCH: 'arm64'
-      # 编译器下载地址
-      CLANG_URL: 'https://github.com/kdrag0n/proton-clang/releases/download/20201217/proton_clang-20201217.tar.zst'
-      GCC64_URL: 'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-10.0.0_r47.tar.gz'
-      GCC32_URL: 'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-10.0.0_r47.tar.gz'
-
+    
     steps:
     - name: Checkout
       uses: actions/checkout@v3
 
-    # 【关键修正1】只安装基础工具，不安装任何GCC编译器，彻底根除 apt 依赖冲突
+    # 1. 安装基础工具 (保留了您上次验证成功的精简列表)
     - name: Setup Basic Tools
       run: |
         sudo apt-get update
@@ -34,67 +29,62 @@ jobs:
           pngcrush rsync schedtool squashfs-tools xsltproc zip \
           zlib1g-dev libncurses5 libncurses5-dev zstd
 
-    # 【关键修正2】手动下载 GCC 4.9 (64位 & 32位)，不依赖系统
-    - name: Download Toolchains
+    # 2. 【核心修正】放弃 wget，全部改用 git clone，100% 杜绝下载失败
+    - name: Clone Toolchains
       run: |
-        # 1. 准备目录
-        mkdir clang gcc64 gcc32
-        
-        # 2. 下载并解压 Clang (带zstd)
-        wget -q $CLANG_URL
-        tar -I zstd -xf proton_clang-*.tar.zst -C clang
+        # 克隆 Proton Clang
+        echo "Cloning Clang..."
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
 
-        # 3. 下载并解压 GCC 64位
-        wget -q -O gcc64.tar.gz $GCC64_URL
-        tar -xf gcc64.tar.gz -C gcc64
+        # 克隆 LineageOS 的 GCC 4.9 (64位) - 比 Google 源更稳
+        echo "Cloning GCC 64..."
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
 
-        # 4. 下载并解压 GCC 32位
-        wget -q -O gcc32.tar.gz $GCC32_URL
-        tar -xf gcc32.tar.gz -C gcc32
+        # 克隆 LineageOS 的 GCC 4.9 (32位)
+        echo "Cloning GCC 32..."
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
 
     - name: Clone Kernel Source
       run: |
         git clone --depth=1 -b $KERNEL_SOURCE_BRANCH $KERNEL_SOURCE kernel_source
 
-    # === 版本号伪造 ===
-    - name: Force Kernel Version (Spoofing)
+    # 3. 植入 SukiSU & 伪造版本号 (保留不动)
+    - name: Patch Kernel & SukiSU
       run: |
         cd kernel_source
-        echo "正在强制修改版本号..."
-        # 强行锁定版本号为 4.9.336
+        
+        # 伪造版本号匹配 ColorOS
+        echo "Applying Version Spoofing..."
         sed -i 's/^VERSION =.*/VERSION = 4/' Makefile
         sed -i 's/^PATCHLEVEL =.*/PATCHLEVEL = 9/' Makefile
         sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 336/' Makefile
-        # 强行锁定后缀
         sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -perf-g30e2137d229f/' Makefile
         touch .scmversion
 
-    - name: Integrate SukiSU (Non-GKI)
-      run: |
-        cd kernel_source
-        echo "正在植入 SukiSU..."
+        # 集成 SukiSU
+        echo "Integrating SukiSU..."
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
     - name: Build Kernel
       run: |
         cd kernel_source
         
-        # 设置编译器路径
+        # 设置路径
         export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
         
         # 清理
         make O=out ARCH=arm64 clean
         make O=out ARCH=arm64 mrproper
         
-        # 生成配置
+        # 配置
         make O=out ARCH=arm64 $KERNEL_DEFCONFIG
 
-        # 二次清除配置里的版本后缀
+        # 清除配置里的后缀
         cd out
         sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=""/' .config
         cd ..
 
-        # 【关键修正3】指定使用刚才下载的独立 GCC 进行交叉编译
+        # 编译 (指向刚才 git clone 下来的目录)
         make -j$(nproc --all) O=out ARCH=arm64 \
           CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -107,10 +97,10 @@ jobs:
         git clone https://github.com/osm0sis/AnyKernel3
         cp kernel_source/out/arch/arm64/boot/$KERNEL_IMAGE_NAME AnyKernel3/
         cd AnyKernel3
-        zip -r9 SukiSU-Mi8SE-Signed.zip * -x .git README.md *placeholder
+        zip -r9 SukiSU-Mi8SE-GitVersion.zip * -x .git README.md *placeholder
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: SukiSU-Kernel-Mi8SE-Ultimate
+        name: SukiSU-Kernel-Mi8SE-GitVersion
         path: AnyKernel3/*.zip
