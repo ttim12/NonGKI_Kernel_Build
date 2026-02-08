@@ -1,15 +1,16 @@
-name: Build SukiSU for Mi8SE (Git Method)
+name: Build SukiSU for Mi8SE (Final Fix)
 on:
   workflow_dispatch:
 
 jobs:
   build:
     name: Build Kernel
+    # 【已验证】使用 Ubuntu 22.04，解决了之前的 Exit 100 依赖报错
     runs-on: ubuntu-22.04
     
     env:
       KERNEL_SOURCE: 'https://github.com/SakuraKyuo/android_kernel_xiaomi_sdm710'
-      KERNEL_SOURCE_BRANCH: '13.0'
+      # 【已修正】删除了 KERNEL_SOURCE_BRANCH 变量，不再指定 13.0，防止报错
       KERNEL_DEFCONFIG: 'vendor/sirius_perf_defconfig'
       KERNEL_IMAGE_NAME: 'Image.gz-dtb'
       ARCH: 'arm64'
@@ -18,7 +19,7 @@ jobs:
     - name: Checkout
       uses: actions/checkout@v3
 
-    # 1. 安装基础工具 (保留了您上次验证成功的精简列表)
+    # 1. 安装基础工具
     - name: Setup Basic Tools
       run: |
         sudo apt-get update
@@ -29,32 +30,37 @@ jobs:
           pngcrush rsync schedtool squashfs-tools xsltproc zip \
           zlib1g-dev libncurses5 libncurses5-dev zstd
 
-    # 2. 【核心修正】放弃 wget，全部改用 git clone，100% 杜绝下载失败
+    # 2. 下载编译器
+    # 【已验证】这一步在你刚才的运行中已经通过了，说明 Git 方法是有效的
     - name: Clone Toolchains
       run: |
         # 克隆 Proton Clang
         echo "Cloning Clang..."
         git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
 
-        # 克隆 LineageOS 的 GCC 4.9 (64位) - 比 Google 源更稳
+        # 克隆 GCC 4.9 (64位)
         echo "Cloning GCC 64..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
 
-        # 克隆 LineageOS 的 GCC 4.9 (32位)
+        # 克隆 GCC 4.9 (32位)
         echo "Cloning GCC 32..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
 
+    # 3. 下载内核源码
+    # 【核心修正】去掉了 -b 参数，解决 "Remote branch 13.0 not found" 报错
     - name: Clone Kernel Source
       run: |
-        git clone --depth=1 -b $KERNEL_SOURCE_BRANCH $KERNEL_SOURCE kernel_source
+        echo "Cloning Kernel Source (Default Branch)..."
+        git clone --depth=1 $KERNEL_SOURCE kernel_source
 
-    # 3. 植入 SukiSU & 伪造版本号 (保留不动)
+    # 4. 植入 SukiSU & 伪造版本号
     - name: Patch Kernel & SukiSU
       run: |
         cd kernel_source
         
-        # 伪造版本号匹配 ColorOS
+        # 伪造版本号：4.9.336-perf-g30e2137d229f
         echo "Applying Version Spoofing..."
+        # 强制修改 Makefile
         sed -i 's/^VERSION =.*/VERSION = 4/' Makefile
         sed -i 's/^PATCHLEVEL =.*/PATCHLEVEL = 9/' Makefile
         sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 336/' Makefile
@@ -65,26 +71,27 @@ jobs:
         echo "Integrating SukiSU..."
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
+    # 5. 开始编译
     - name: Build Kernel
       run: |
         cd kernel_source
         
-        # 设置路径
+        # 设置编译器路径
         export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
         
-        # 清理
+        # 清理环境
         make O=out ARCH=arm64 clean
         make O=out ARCH=arm64 mrproper
         
-        # 配置
+        # 生成配置文件
         make O=out ARCH=arm64 $KERNEL_DEFCONFIG
 
-        # 清除配置里的后缀
+        # 清除配置里的后缀，防止干扰伪造
         cd out
         sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=""/' .config
         cd ..
 
-        # 编译 (指向刚才 git clone 下来的目录)
+        # 编译命令
         make -j$(nproc --all) O=out ARCH=arm64 \
           CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -92,6 +99,7 @@ jobs:
           CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/gcc32/bin/arm-linux-androideabi- \
           $KERNEL_IMAGE_NAME
 
+    # 6. 打包
     - name: Package AnyKernel3
       run: |
         git clone https://github.com/osm0sis/AnyKernel3
@@ -99,8 +107,9 @@ jobs:
         cd AnyKernel3
         zip -r9 SukiSU-Mi8SE-GitVersion.zip * -x .git README.md *placeholder
 
+    # 7. 上传
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: SukiSU-Kernel-Mi8SE-GitVersion
+        name: SukiSU-Kernel-Mi8SE-Final
         path: AnyKernel3/*.zip
