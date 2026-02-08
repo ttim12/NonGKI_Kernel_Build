@@ -1,4 +1,4 @@
-name: Build SukiSU for Mi8SE (Auto-Detect)
+name: Build SukiSU for Mi8SE (Auto-Seek)
 on:
   workflow_dispatch:
 
@@ -9,8 +9,6 @@ jobs:
     
     env:
       KERNEL_SOURCE: 'https://github.com/SakuraKyuo/android_kernel_xiaomi_sdm710'
-      # 先填一个最可能的通用配置，如果不对，脚本会自动搜索
-      KERNEL_DEFCONFIG: 'sdm710_defconfig'
       KERNEL_IMAGE_NAME: 'Image.gz-dtb'
       ARCH: 'arm64'
     
@@ -41,21 +39,11 @@ jobs:
         echo "Cloning GCC 32..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
 
-    # 3. 下载内核源码 (默认分支)
+    # 3. 下载内核源码
     - name: Clone Kernel Source
       run: |
+        echo "Cloning Source..."
         git clone --depth=1 $KERNEL_SOURCE kernel_source
-
-    # ===【关键步骤：自动查找正确的配置文件】===
-    # 如果 sdm710_defconfig 不存在，列出所有文件帮你找
-    - name: Check Configs
-      run: |
-        cd kernel_source
-        echo "正在搜索配置文件..."
-        ls arch/arm64/configs/
-        echo "--------------------------------"
-        # 尝试查找包含 sdm710 或 sirius 的配置文件
-        find arch/arm64/configs -name "*defconfig" | grep -iE "sdm710|sirius" || true
 
     # 4. 植入 SukiSU & 伪造版本号
     - name: Patch Kernel & SukiSU
@@ -72,7 +60,7 @@ jobs:
         # 集成 SukiSU
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
-    # 5. 开始编译
+    # 5. 自动追踪配置并编译
     - name: Build Kernel
       run: |
         cd kernel_source
@@ -81,14 +69,45 @@ jobs:
         make O=out ARCH=arm64 clean
         make O=out ARCH=arm64 mrproper
         
-        # 【修改】使用通用配置 sdm710_defconfig
-        # 如果这一步还报错，请查看上一步 "Check Configs" 的日志，里面列出了正确的文件名
-        make O=out ARCH=arm64 sdm710_defconfig
+        # ===【核心修改：自动寻找配置文件】===
+        echo "正在自动扫描配置文件..."
+        
+        # 1. 优先寻找名字里包含 'sirius' (米8SE) 的配置文件
+        DETECTED_CONFIG=$(find arch/arm64/configs -name "*defconfig" | grep "sirius" | head -n 1)
+        
+        # 2. 没找到的话，找包含 'sdm710' 的
+        if [ -z "$DETECTED_CONFIG" ]; then
+            DETECTED_CONFIG=$(find arch/arm64/configs -name "*defconfig" | grep "sdm710" | head -n 1)
+        fi
+        
+        # 3. 再没找到，找 vendor 目录下的第一个配置文件 (保底)
+        if [ -z "$DETECTED_CONFIG" ]; then
+             DETECTED_CONFIG=$(find arch/arm64/configs -name "vendor*defconfig" | head -n 1)
+        fi
 
+        # 如果还是空的，列出所有文件让用户看（防止绝望）
+        if [ -z "$DETECTED_CONFIG" ]; then
+            echo "❌ 致命错误：无法在源码中找到任何配置文件！"
+            ls -R arch/arm64/configs
+            exit 1
+        fi
+
+        # 处理路径：去掉 arch/arm64/configs/ 前缀，只保留文件名
+        # 例如：arch/arm64/configs/vendor/sirius_perf_defconfig -> vendor/sirius_perf_defconfig
+        REAL_CONFIG=${DETECTED_CONFIG#arch/arm64/configs/}
+        
+        echo "✅ 成功找到配置文件: $REAL_CONFIG"
+        echo "正在使用该配置开始编译..."
+        
+        # 使用自动找到的文件名进行配置
+        make O=out ARCH=arm64 $REAL_CONFIG
+
+        # 清除配置里的后缀
         cd out
         sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=""/' .config
         cd ..
 
+        # 编译
         make -j$(nproc --all) O=out ARCH=arm64 \
           CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -104,6 +123,7 @@ jobs:
         cd AnyKernel3
         zip -r9 SukiSU-Mi8SE-Signed.zip * -x .git README.md *placeholder
 
+    # 7. 上传
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
