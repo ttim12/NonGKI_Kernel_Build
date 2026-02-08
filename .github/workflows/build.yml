@@ -1,12 +1,13 @@
-name: Build SukiSU for Mi8SE (Final Fix)
+name: Build SukiSU for Mi8SE (Ultimate)
 on:
   workflow_dispatch:
 
 jobs:
   build:
     name: Build Kernel
-    # 修改点1：使用 Ubuntu 22.04，既保留了老兼容性，又不需要排长队
+    # 【修正1】锁定 Ubuntu 22.04 (Jammy)，这是目前兼容性最好且不需要排长队的版本
     runs-on: ubuntu-22.04
+    
     env:
       KERNEL_SOURCE: 'https://github.com/SakuraKyuo/android_kernel_xiaomi_sdm710'
       KERNEL_SOURCE_BRANCH: '13.0'
@@ -22,27 +23,32 @@ jobs:
     - name: Setup Build Environment
       run: |
         sudo apt-get update
-        # 修改点2：精简了依赖列表，删除了在 24.04/22.04 上容易报错的无用包
-        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32readline-dev lib32z1-dev liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev libncurses5 libncurses5-dev
+        # 【修正2】补全 zstd, libncurses5, 交叉编译器，确保环境万无一失
+        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32readline-dev lib32z1-dev liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev libncurses5 libncurses5-dev zstd gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
     - name: Download Clang Toolchain
       run: |
         mkdir clang
         cd clang
         wget -q $CLANG_URL
+        # 【修正3】使用 zstd 解压，防止报错 code 8
         tar -I zstd -xf proton_clang-*.tar.zst
 
     - name: Clone Kernel Source
       run: |
         git clone --depth=1 -b $KERNEL_SOURCE_BRANCH $KERNEL_SOURCE kernel_source
 
-    # ===【核心步骤：伪造内核版本号】===
-    # 严格匹配您的截图：4.9.336-perf-g30e2137d229f
+    # ===【修正4：精准伪造版本号】===
+    # 强制修改 Makefile，确保编译出来的版本号是 4.9.336-perf-g30e2137d229f
     - name: Force Kernel Version (Spoofing)
       run: |
         cd kernel_source
-        echo "正在修改版本号以匹配 ColorOS..."
+        echo "正在强制修改版本号..."
+        # 强制将副版本号设为 336 (防止源码是 4.9.2xx 导致对不上)
+        sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 336/' Makefile
+        # 强制设置后缀
         sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -perf-g30e2137d229f/' Makefile
+        # 清除 Git 版本干扰
         touch .scmversion
 
     - name: Integrate SukiSU (Non-GKI)
@@ -55,16 +61,20 @@ jobs:
       run: |
         cd kernel_source
         export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
+        
+        # 清理环境
         make O=out ARCH=arm64 clean
         make O=out ARCH=arm64 mrproper
         
+        # 生成配置文件
         make O=out ARCH=arm64 $KERNEL_DEFCONFIG
 
-        # 二次确认版本号
+        # 二次确认配置里的版本号为空，防止干扰
         cd out
         sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=""/' .config
         cd ..
 
+        # 开始编译
         make -j$(nproc --all) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- $KERNEL_IMAGE_NAME
 
     - name: Package AnyKernel3
@@ -72,10 +82,11 @@ jobs:
         git clone https://github.com/osm0sis/AnyKernel3
         cp kernel_source/out/arch/arm64/boot/$KERNEL_IMAGE_NAME AnyKernel3/
         cd AnyKernel3
-        zip -r9 SukiSU-Mi8SE-Fix.zip * -x .git README.md *placeholder
+        # 打包成 zip
+        zip -r9 SukiSU-Mi8SE-Ultimate.zip * -x .git README.md *placeholder
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: SukiSU-Kernel-Mi8SE-Final
+        name: SukiSU-Kernel-Mi8SE-Ultimate
         path: AnyKernel3/*.zip
