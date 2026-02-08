@@ -1,11 +1,11 @@
-name: Build SukiSU for Mi8SE (Ultimate)
+name: Build SukiSU for Mi8SE (Standalone Toolchain)
 on:
   workflow_dispatch:
 
 jobs:
   build:
     name: Build Kernel
-    # 【修正1】锁定 Ubuntu 22.04 (Jammy)，这是目前兼容性最好且不需要排长队的版本
+    # 使用 Ubuntu 22.04，排队快，且基础库兼容性好
     runs-on: ubuntu-22.04
     
     env:
@@ -14,41 +14,59 @@ jobs:
       KERNEL_DEFCONFIG: 'vendor/sirius_perf_defconfig'
       KERNEL_IMAGE_NAME: 'Image.gz-dtb'
       ARCH: 'arm64'
+      # 编译器下载地址
       CLANG_URL: 'https://github.com/kdrag0n/proton-clang/releases/download/20201217/proton_clang-20201217.tar.zst'
+      GCC64_URL: 'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/aarch64/aarch64-linux-android-4.9/+archive/refs/tags/android-10.0.0_r47.tar.gz'
+      GCC32_URL: 'https://android.googlesource.com/platform/prebuilts/gcc/linux-x86/arm/arm-linux-androideabi-4.9/+archive/refs/tags/android-10.0.0_r47.tar.gz'
 
     steps:
     - name: Checkout
       uses: actions/checkout@v3
 
-    - name: Setup Build Environment
+    # 【关键修正1】只安装基础工具，不安装任何GCC编译器，彻底根除 apt 依赖冲突
+    - name: Setup Basic Tools
       run: |
         sudo apt-get update
-        # 【修正2】补全 zstd, libncurses5, 交叉编译器，确保环境万无一失
-        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32readline-dev lib32z1-dev liblz4-tool libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev libncurses5 libncurses5-dev zstd gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+        sudo apt-get install -y --no-install-recommends \
+          bc bison build-essential curl flex git gnupg gperf \
+          imagemagick lib32readline-dev lib32z1-dev liblz4-tool \
+          libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop \
+          pngcrush rsync schedtool squashfs-tools xsltproc zip \
+          zlib1g-dev libncurses5 libncurses5-dev zstd
 
-    - name: Download Clang Toolchain
+    # 【关键修正2】手动下载 GCC 4.9 (64位 & 32位)，不依赖系统
+    - name: Download Toolchains
       run: |
-        mkdir clang
-        cd clang
+        # 1. 准备目录
+        mkdir clang gcc64 gcc32
+        
+        # 2. 下载并解压 Clang (带zstd)
         wget -q $CLANG_URL
-        # 【修正3】使用 zstd 解压，防止报错 code 8
-        tar -I zstd -xf proton_clang-*.tar.zst
+        tar -I zstd -xf proton_clang-*.tar.zst -C clang
+
+        # 3. 下载并解压 GCC 64位
+        wget -q -O gcc64.tar.gz $GCC64_URL
+        tar -xf gcc64.tar.gz -C gcc64
+
+        # 4. 下载并解压 GCC 32位
+        wget -q -O gcc32.tar.gz $GCC32_URL
+        tar -xf gcc32.tar.gz -C gcc32
 
     - name: Clone Kernel Source
       run: |
         git clone --depth=1 -b $KERNEL_SOURCE_BRANCH $KERNEL_SOURCE kernel_source
 
-    # ===【修正4：精准伪造版本号】===
-    # 强制修改 Makefile，确保编译出来的版本号是 4.9.336-perf-g30e2137d229f
+    # === 版本号伪造 ===
     - name: Force Kernel Version (Spoofing)
       run: |
         cd kernel_source
         echo "正在强制修改版本号..."
-        # 强制将副版本号设为 336 (防止源码是 4.9.2xx 导致对不上)
+        # 强行锁定版本号为 4.9.336
+        sed -i 's/^VERSION =.*/VERSION = 4/' Makefile
+        sed -i 's/^PATCHLEVEL =.*/PATCHLEVEL = 9/' Makefile
         sed -i 's/^SUBLEVEL =.*/SUBLEVEL = 336/' Makefile
-        # 强制设置后缀
+        # 强行锁定后缀
         sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -perf-g30e2137d229f/' Makefile
-        # 清除 Git 版本干扰
         touch .scmversion
 
     - name: Integrate SukiSU (Non-GKI)
@@ -60,30 +78,36 @@ jobs:
     - name: Build Kernel
       run: |
         cd kernel_source
+        
+        # 设置编译器路径
         export PATH=$GITHUB_WORKSPACE/clang/bin:$PATH
         
-        # 清理环境
+        # 清理
         make O=out ARCH=arm64 clean
         make O=out ARCH=arm64 mrproper
         
-        # 生成配置文件
+        # 生成配置
         make O=out ARCH=arm64 $KERNEL_DEFCONFIG
 
-        # 二次确认配置里的版本号为空，防止干扰
+        # 二次清除配置里的版本后缀
         cd out
         sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=""/' .config
         cd ..
 
-        # 开始编译
-        make -j$(nproc --all) O=out ARCH=arm64 CC=clang CLANG_TRIPLE=aarch64-linux-gnu- CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- $KERNEL_IMAGE_NAME
+        # 【关键修正3】指定使用刚才下载的独立 GCC 进行交叉编译
+        make -j$(nproc --all) O=out ARCH=arm64 \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=$GITHUB_WORKSPACE/gcc64/bin/aarch64-linux-android- \
+          CROSS_COMPILE_ARM32=$GITHUB_WORKSPACE/gcc32/bin/arm-linux-androideabi- \
+          $KERNEL_IMAGE_NAME
 
     - name: Package AnyKernel3
       run: |
         git clone https://github.com/osm0sis/AnyKernel3
         cp kernel_source/out/arch/arm64/boot/$KERNEL_IMAGE_NAME AnyKernel3/
         cd AnyKernel3
-        # 打包成 zip
-        zip -r9 SukiSU-Mi8SE-Ultimate.zip * -x .git README.md *placeholder
+        zip -r9 SukiSU-Mi8SE-Signed.zip * -x .git README.md *placeholder
 
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
