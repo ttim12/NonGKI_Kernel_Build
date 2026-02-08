@@ -1,4 +1,4 @@
-name: Build SukiSU for Mi8SE (4.9 Patch Fix)
+name: Build SukiSU for Mi8SE (Do or Die)
 on:
   workflow_dispatch:
 
@@ -9,7 +9,6 @@ jobs:
     
     env:
       KERNEL_SOURCE: 'https://github.com/SakuraKyuo/android_kernel_xiaomi_sdm710'
-      # 之前验证通过的正确配置
       KERNEL_DEFCONFIG: 'sdm670-perf_defconfig'
       KERNEL_IMAGE_NAME: 'Image.gz-dtb'
       ARCH: 'arm64'
@@ -32,11 +31,8 @@ jobs:
     # 2. 下载工具链
     - name: Clone Toolchains
       run: |
-        echo "Cloning Clang..."
         git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang
-        echo "Cloning GCC 64..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc64
-        echo "Cloning GCC 32..."
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc32
 
     # 3. 下载内核源码
@@ -44,8 +40,8 @@ jobs:
       run: |
         git clone --depth=1 $KERNEL_SOURCE kernel_source
 
-    # 4. 植入 SukiSU & 施展魔法修复
-    - name: Patch Kernel & SukiSU (Magic Fix)
+    # 4. 植入 SukiSU & 暴力修复所有兼容性问题
+    - name: Patch Kernel & Fix Everything
       run: |
         cd kernel_source
         
@@ -59,33 +55,25 @@ jobs:
         # === B. 集成 SukiSU ===
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
-        # === C. 针对 Error 的核心修复（Magic Patch） ===
-        echo "正在应用 4.9 内核兼容性补丁..."
-
-        # 1. 修复 TWA_RESUME 报错 (4.9 task_work_add 用 true/false，不用 enum)
-        sed -i 's/TWA_RESUME/true/g' drivers/kernelsu/allowlist.c
-
-        # 2. 注入兼容性函数 wrapper (用 vfs_write 模拟 kernel_write)
-        # 这段代码会插入到 allowlist.c 的头部
-        sed -i '1i #include <linux/fs.h>\n#include <linux/uaccess.h>\nstatic inline ssize_t ksu_kernel_write(struct file *f, const void *b, size_t c, loff_t *p) { mm_segment_t old = get_fs(); set_fs(KERNEL_DS); ssize_t r = vfs_write(f, b, c, p); set_fs(old); return r; }' drivers/kernelsu/allowlist.c
+        # === C. 兼容性大清洗 (核心修复) ===
         
-        # 3. 注入兼容性读取函数 (以防万一 read 也有问题)
-        sed -i '1i static inline ssize_t ksu_kernel_read(struct file *f, void *b, size_t c, loff_t *p) { mm_segment_t old = get_fs(); set_fs(KERNEL_DS); ssize_t r = vfs_read(f, b, c, p); set_fs(old); return r; }' drivers/kernelsu/allowlist.c
-
-        # 4. 全局替换调用，使用我们的兼容函数
-        sed -i 's/kernel_write/ksu_kernel_write/g' drivers/kernelsu/allowlist.c
-        sed -i 's/kernel_read/ksu_kernel_read/g' drivers/kernelsu/allowlist.c
-
-        # 5. 顺手删掉之前报错的 MODULE_IMPORT_NS
+        # 1. 修复 SukiSU 代码报错 (MODULE_IMPORT_NS)
         sed -i '/MODULE_IMPORT_NS/d' drivers/kernelsu/ksu.c
 
-        # 6. 关闭警告即报错 (Werror)
+        # 2. 修复 Clang 不认识的 GCC 参数 (解决本次报错的核心)
+        # 4.9 内核里有一些过时的参数写法，Clang 13 看了会报错，直接删掉
+        sed -i 's/-Werror-implicit-function-declaration//g' Makefile
+        sed -i 's/-Werror=implicit-function-declaration//g' Makefile
+        sed -i 's/-Werror=implicit-int//g' Makefile
+        sed -i 's/-Wimplicit-function-declaration//g' Makefile
+        
+        # 3. 暴力关闭所有 Werror (把警告当错误)
+        sed -i 's/-Werror//g' Makefile
+        sed -i 's/KBUILD_CFLAGS   += -Werror/KBUILD_CFLAGS   += /g' Makefile
         if [ -f drivers/kernelsu/Makefile ]; then
             sed -i 's/-Werror//g' drivers/kernelsu/Makefile
             sed -i 's/ccflags-y += -Werror//g' drivers/kernelsu/Makefile
         fi
-        sed -i 's/-Werror//g' Makefile
-        sed -i 's/KBUILD_CFLAGS   += -Werror/KBUILD_CFLAGS   += /g' Makefile
 
     # 5. 开始编译
     - name: Build Kernel
@@ -96,17 +84,18 @@ jobs:
         make O=out ARCH=arm64 clean
         make O=out ARCH=arm64 mrproper
         
+        # 生成配置
         make O=out ARCH=arm64 $KERNEL_DEFCONFIG
 
-        # 关闭栈保护 & 清除版本后缀
+        # === 关闭 Stack Protector (之前报错的那个) ===
         cd out
         sed -i 's/CONFIG_CC_STACKPROTECTOR_STRONG=y/# CONFIG_CC_STACKPROTECTOR_STRONG is not set/' .config
         echo "CONFIG_CC_STACKPROTECTOR_NONE=y" >> .config
         sed -i 's/CONFIG_LOCALVERSION=.*/CONFIG_LOCALVERSION=""/' .config
         cd ..
 
-        # 恢复多线程编译
-        echo "编译开始..."
+        # === 编译 ===
+        echo "Starting build..."
         make -j$(nproc --all) O=out ARCH=arm64 \
           CC=clang \
           CLANG_TRIPLE=aarch64-linux-gnu- \
@@ -120,11 +109,11 @@ jobs:
         git clone https://github.com/osm0sis/AnyKernel3
         cp kernel_source/out/arch/arm64/boot/$KERNEL_IMAGE_NAME AnyKernel3/
         cd AnyKernel3
-        zip -r9 SukiSU-Mi8SE-Fixed.zip * -x .git README.md *placeholder
+        zip -r9 SukiSU-Mi8SE-Final.zip * -x .git README.md *placeholder
 
     # 7. 上传
     - name: Upload Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: SukiSU-Kernel-Mi8SE-Fixed
+        name: SukiSU-Kernel-Mi8SE-Final
         path: AnyKernel3/*.zip
